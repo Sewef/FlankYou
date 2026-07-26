@@ -21,9 +21,11 @@ import { toTokenCellInfo } from "./grid.js";
 import { escapeHtml } from "./html.js";
 import {
   ensureExtensionMetadata,
+  getTeam,
   isFlankableImage,
   isFlankUFlankedIcon,
   isFlankUHitbox,
+  isImmune,
 } from "./items.js";
 import { applyTheme } from "./theme.js";
 
@@ -37,10 +39,8 @@ const FLANKED_ICON_GRID = {
   dpi: 256,
   offset: { x: 0, y: 0 },
 };
-const REFRESH_DEBOUNCE_MS = 180;
-const IGNORE_OWN_ITEM_CHANGES_MS = 300;
-
 let gridDpi = 150;
+let gridType = null;
 let unsubscribeItems = null;
 let unsubscribeGrid = null;
 let unsubscribeRoomMetadata = null;
@@ -51,8 +51,9 @@ let isUpdatingHitboxes = false;
 let isUpdatingFlankedIcons = false;
 let isUpdatingFlankedMetadata = false;
 let showHitbox = localStorage.getItem(`${EXTENSION_ID}/show-hitbox`) === "true";
-let refreshTimer = null;
-let ignoreItemChangesUntil = 0;
+let refreshPromise = null;
+let refreshQueued = false;
+let lastTokenInputSignature = null;
 let lastHitboxSignature = null;
 let lastFlankedIconSignature = null;
 let lastFlankedMetadataSignature = null;
@@ -192,16 +193,27 @@ async function handleSceneReady(ready) {
   unsubscribeItems?.();
   unsubscribeGrid?.();
   await refreshGrid();
-  unsubscribeGrid = OBR.scene.grid.onChange(async () => {
-    await refreshGrid();
-    await refreshTokenPositions();
-  });
-  unsubscribeItems = OBR.scene.items.onChange(scheduleTokenRefresh);
+  unsubscribeGrid = OBR.scene.grid.onChange(handleGridChange);
+  unsubscribeItems = OBR.scene.items.onChange(handleItemsChange);
   await refreshTokenPositions();
 }
 
 async function refreshGrid() {
-  gridDpi = await OBR.scene.grid.getDpi();
+  [gridDpi, gridType] = await Promise.all([
+    OBR.scene.grid.getDpi(),
+    OBR.scene.grid.getType(),
+  ]);
+}
+
+function handleGridChange(grid) {
+  if (grid.dpi === gridDpi && grid.type === gridType) {
+    return;
+  }
+
+  gridDpi = grid.dpi;
+  gridType = grid.type;
+  resetSyncSignatures();
+  refreshTokenPositions();
 }
 
 async function refreshRoomSettings() {
@@ -229,13 +241,29 @@ function handleRoomMetadataChange(metadata, refresh = true) {
 }
 
 async function refreshTokenPositions() {
+  refreshQueued = true;
+
+  if (!refreshPromise) {
+    refreshPromise = drainTokenRefreshes();
+  }
+
+  return refreshPromise;
+}
+
+async function drainTokenRefreshes() {
   try {
-    if (
-      isUpdatingHitboxes ||
-      isUpdatingFlankedIcons ||
-      isUpdatingFlankedMetadata ||
-      !(await OBR.scene.isReady())
-    ) {
+    while (refreshQueued) {
+      refreshQueued = false;
+      await performTokenRefresh();
+    }
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function performTokenRefresh() {
+  try {
+    if (!(await OBR.scene.isReady())) {
       return;
     }
 
@@ -244,6 +272,7 @@ async function refreshTokenPositions() {
     const items = await OBR.scene.items.getItems((item) => {
       return isFlankableImage(item, activeMountsCanFlank);
     });
+    lastTokenInputSignature = getTokenInputSignature(items);
     const tokens = await Promise.all(
       items.map((item) => {
         return toTokenCellInfo(item, gridDpi, (...args) => OBR.scene.grid.snapPosition(...args));
@@ -266,15 +295,15 @@ async function refreshTokenPositions() {
   }
 }
 
-function scheduleTokenRefresh() {
-  if (Date.now() < ignoreItemChangesUntil) {
+function handleItemsChange(items) {
+  const nextSignature = getTokenInputSignature(items);
+
+  if (nextSignature === lastTokenInputSignature) {
     return;
   }
 
-  window.clearTimeout(refreshTimer);
-  refreshTimer = window.setTimeout(() => {
-    refreshTokenPositions();
-  }, REFRESH_DEBOUNCE_MS);
+  lastTokenInputSignature = nextSignature;
+  refreshTokenPositions();
 }
 
 async function registerContextMenus() {
@@ -411,7 +440,6 @@ async function syncHitboxes(tokens) {
   }
 
   isUpdatingHitboxes = true;
-  ignoreItemChangesUntil = Date.now() + IGNORE_OWN_ITEM_CHANGES_MS;
 
   try {
     await clearHitboxes();
@@ -439,7 +467,6 @@ async function syncFlankedIcons(tokens) {
   }
 
   isUpdatingFlankedIcons = true;
-  ignoreItemChangesUntil = Date.now() + IGNORE_OWN_ITEM_CHANGES_MS;
 
   try {
     await clearFlankedIcons();
@@ -462,7 +489,6 @@ async function clearFlankedIcons() {
     return;
   }
 
-  ignoreItemChangesUntil = Date.now() + IGNORE_OWN_ITEM_CHANGES_MS;
   const icons = await getFlankedIcons();
 
   if (icons.length) {
@@ -483,7 +509,6 @@ async function syncFlankedMetadata(tokens) {
   const flankedById = new Map(tokens.map((token) => [token.id, token.flanked]));
 
   isUpdatingFlankedMetadata = true;
-  ignoreItemChangesUntil = Date.now() + IGNORE_OWN_ITEM_CHANGES_MS;
 
   try {
     await OBR.scene.items.updateItems(
@@ -517,7 +542,6 @@ async function clearHitboxes() {
     return;
   }
 
-  ignoreItemChangesUntil = Date.now() + IGNORE_OWN_ITEM_CHANGES_MS;
   const hitboxes = await OBR.scene.items.getItems(isFlankUHitbox);
 
   if (hitboxes.length) {
@@ -526,6 +550,7 @@ async function clearHitboxes() {
 }
 
 function resetSyncSignatures() {
+  lastTokenInputSignature = null;
   lastHitboxSignature = null;
   lastFlankedIconSignature = null;
   lastFlankedMetadataSignature = null;
@@ -540,7 +565,6 @@ function getHitboxSignature(tokens) {
         token.size.width,
         token.size.height,
         gridDpi,
-        activeMountsCanFlank,
       ].join(":");
     })
     .sort()
@@ -562,9 +586,34 @@ function getFlankedIconSignature(tokens) {
 }
 
 function getFlankedMetadataSignature(tokens) {
-  return [activeMountsCanFlank, ...tokens
+  return tokens
     .map((token) => `${token.id}:${token.flanked}`)
-    .sort()]
+    .sort()
+    .join("|");
+}
+
+function getTokenInputSignature(items) {
+  return items
+    .filter((item) => isFlankableImage(item, activeMountsCanFlank))
+    .map((item) => {
+      return JSON.stringify([
+        item.id,
+        item.name,
+        item.position.x,
+        item.position.y,
+        item.rotation,
+        item.scale.x,
+        item.scale.y,
+        item.image.width,
+        item.image.height,
+        item.grid.dpi,
+        item.grid.offset.x,
+        item.grid.offset.y,
+        getTeam(item),
+        isImmune(item),
+      ]);
+    })
+    .sort()
     .join("|");
 }
 
@@ -732,7 +781,6 @@ function isTransientObrError(error) {
 }
 
 window.addEventListener("pagehide", () => {
-  window.clearTimeout(refreshTimer);
   unsubscribeItems?.();
   unsubscribeGrid?.();
   unsubscribeRoomMetadata?.();
