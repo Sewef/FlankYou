@@ -2,8 +2,8 @@
 title: Flank You
 description: A Flanking detection system for Dnd 5e and PTU 1.05
 author: Sewef
-image: https://flanku.onrender.com/hero.png
-icon: https://flanku.onrender.com/icon.svg
+image: https://flankyou.onrender.com/hero.png
+icon: https://flankyou.onrender.com/icon.svg
 tags:
   - combat
   - automation
