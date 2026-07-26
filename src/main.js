@@ -65,7 +65,7 @@ document.querySelector("#app").innerHTML = `
   <main class="panel">
     <header class="header">
       <div>
-        <p class="eyebrow">Flank U very much</p>
+        <p class="eyebrow">Flank You for Playing</p>
         <div class="header-controls">
           <button id="refresh" type="button">Refresh</button>
           <label class="option-toggle">

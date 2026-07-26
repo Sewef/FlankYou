@@ -1,9 +1,9 @@
 {
-  "name": "Flank U",
+  "name": "Flank You",
   "version": "1.0.0",
   "manifest_version": 1,
   "action": {
-    "title": "Flank U",
+    "title": "Flank You",
     "icon": "/icon.svg",
     "popover": "/",
     "height": 400,
