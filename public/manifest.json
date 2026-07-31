@@ -2,6 +2,7 @@
   "name": "Flank You",
   "version": "1.0.0",
   "manifest_version": 1,
+  "icon": "https://flankyou.onrender.com/icon.svg",
   "action": {
     "title": "Flank You",
     "icon": "/icon.svg",
